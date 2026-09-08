@@ -16,6 +16,8 @@
 //                          asks for detection; unset falls back to the pin, and
 //                          to detection when nothing was pinned.
 //   HIPCC_VERIFY_OCLOC     override ocloc binary (default: ocloc).
+//   HIPCC_VERIFY_SYSFS_ROOT  where to look for PCI devices, for tests that need
+//                          an inventory this machine does not have.
 //
 // Args:
 //   --print-devices        print the -device values that would be used, one
@@ -94,10 +96,15 @@ std::vector<std::string> split(const std::string &s, char delim) {
 // headless compute card need not report the one a desktop card does.
 //
 // Returns empty where there is no /sys to read, which includes macOS.
-std::vector<std::string> detectHostDevices() {
+//
+// The directory is a parameter so the rule above can be checked against a
+// fixture holding devices this machine does not have: two cards of one model,
+// a second model, a non-Intel card and a non-display Intel device all in one
+// tree. Nothing in a build sets it.
+std::vector<std::string> detectHostDevices(const fs::path &root) {
   std::vector<std::string> devices;
   std::error_code ec;
-  fs::directory_iterator it("/sys/bus/pci/devices", ec);
+  fs::directory_iterator it(root, ec);
   if (ec) return devices;
 
   auto readField = [](const fs::path &p) {
@@ -154,7 +161,22 @@ DeviceList resolveDevices() {
   // detection on a pinned build.
   std::string devsEnv = Env ? Env : CHIP_KERNEL_VERIFY_DEFAULT_DEVICES;
   if (!devsEnv.empty()) return {split(devsEnv, ','), true};
-  return {detectHostDevices(), false};
+
+  const char *Root = std::getenv("HIPCC_VERIFY_SYSFS_ROOT");
+  return {detectHostDevices(Root ? Root : "/sys/bus/pci/devices"), false};
+}
+
+// A run that checked nothing, said the same way wherever it is reached. A
+// target that was asked for, by HIPCC_VERIFY_DEVICES or by the configure-time
+// pin, and could not be checked is a failure of something the user set up. A
+// target that was only detected is not: an ocloc with no entry for the GPU in
+// this machine must not be able to stop the machine building chipStar at all.
+int reportNoCoverage(const DeviceList &resolved, Mode mode,
+                     const std::string &why) {
+  std::cerr << "[chip-kernel-verify] " << why
+            << " — nothing was verified. Set HIPCC_VERIFY_DEVICES to an ocloc"
+               " -device value to check against a specific target.\n";
+  return resolved.Requested && mode == Mode::Fail ? 1 : 0;
 }
 
 std::string oclocBin() {
@@ -311,11 +333,9 @@ int main(int argc, char *argv[]) {
     return 0;
   }
 
-  if (!oclocAvailable()) {
-    std::cerr << "[chip-kernel-verify] ocloc not found (tried '" << oclocBin()
-              << "') — skipping IGC #403 verification\n";
-    return 0;
-  }
+  if (!oclocAvailable())
+    return reportNoCoverage(resolveDevices(), mode,
+                            "ocloc not found (tried '" + oclocBin() + "')");
 
   // Slurp the input. seekToMagic() in spirv-extractor does an unbounded 1MB
   // scan on the raw data path, so pad the buffer to avoid OOB reads on small
@@ -388,23 +408,12 @@ int main(int argc, char *argv[]) {
   DeviceList resolved = resolveDevices();
   const auto &devices = resolved.Devices;
 
-  // A target that was asked for and could not be checked is a failure of
-  // something the user set up, and in fail mode it should stop the build like
-  // any other. A target that was only detected is different: an ocloc with no
-  // entry for the GPU in this machine must not be able to stop the machine
-  // building chipStar at all, so that stays a warning.
-  auto noCoverage = [&](const std::string &why) {
-    std::cerr << "[chip-kernel-verify] " << why
-              << " — nothing was verified. Set HIPCC_VERIFY_DEVICES to an ocloc"
-                 " -device value to check against a specific target.\n";
-    return resolved.Requested && mode == Mode::Fail ? 1 : 0;
-  };
-
   if (devices.empty())
-    return noCoverage(resolved.Requested
-                          ? "the requested device list names no device"
-                          : "no Intel GPU found in /sys/bus/pci/devices and no"
-                            " HIPCC_VERIFY_DEVICES set");
+    return reportNoCoverage(resolved, mode,
+                            resolved.Requested
+                                ? "the requested device list names no device"
+                                : "no Intel GPU found in /sys/bus/pci/devices"
+                                  " and no HIPCC_VERIFY_DEVICES set");
 
   fs::path workDir = fs::temp_directory_path() /
                      ("chip-kernel-verify-" + std::to_string(getpid()));
@@ -429,8 +438,9 @@ int main(int argc, char *argv[]) {
   // Every device skipped means the run produced no coverage at all, which is
   // indistinguishable from a clean pass unless it is said out loud.
   if (compared == 0)
-    return noCoverage("none of the " + std::to_string(devices.size()) +
-                      " device(s) could be checked");
+    return reportNoCoverage(resolved, mode,
+                            "none of the " + std::to_string(devices.size()) +
+                                " device(s) could be checked");
 
   return fails == 0 ? 0 : 1;
 }

@@ -206,6 +206,22 @@ case "${noocloc_out}" in
      echo "${noocloc_out:-<no output>}"; exit 1 ;;
 esac
 
+# A link that carries no kernels never needed ocloc, so nothing about the
+# device policy may reject it. hipcc runs this hook on every final link,
+# host-only ones included.
+HOSTONLY="${WORK}/hostonly"
+printf 'int main(void){return 0;}\n' > "${WORK}/hostonly.c"
+if cc "${WORK}/hostonly.c" -o "${HOSTONLY}" 2>/dev/null; then
+  hostonly_out=$(HIPCC_VERIFY_DEVICES=dg2 HIPCC_VERIFY_OCLOC="${WORK}/no-such-ocloc" \
+                   "${BIN}" "${HOSTONLY}" 2>&1 >/dev/null)
+  hostonly_rc=$?
+  if [ ${hostonly_rc} -ne 0 ]; then
+    echo "FAIL: a host-only link exited ${hostonly_rc}, expected 0"
+    echo "${hostonly_out:-<no output>}"
+    exit 1
+  fi
+fi
+
 # The detection rule itself, against an inventory this machine does not have, so
 # the expectation comes from the fixture rather than from a second reading of
 # the same sysfs the tool reads.

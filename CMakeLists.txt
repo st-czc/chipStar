@@ -281,7 +281,7 @@ option(CHIP_SET_RPATH "Add CMAKE_INSTALL_PREFIX/lib to the RPATH for chipStar ex
 option(CHIP_ENABLE_UNCOMPILABLE_TESTS "Enable tests which are known to not compile" OFF)
 option(CHIP_BUILD_TESTS "Enable build_tests target" ON)
 option(HIPCC_VERIFY "Run ocloc kernel-coverage verification after hipcc compiles (detects IGC dropped kernels)" ON)
-set(HIPCC_VERIFY_DEVICES "dg2" CACHE STRING "Comma-separated ocloc -device targets used when HIPCC_VERIFY is ON")
+set(HIPCC_VERIFY_DEVICES "" CACHE STRING "Comma-separated ocloc -device targets used when HIPCC_VERIFY is ON. Empty means the Intel GPUs present on the build host, which is what the code will run on")
 option(CHIP_BUILD_SAMPLES "Build samples" ON)
 option(CHIP_USE_EXTERNAL_HIP_TESTS "Use Catch2 tests from the hip-tests submodule" ON)
 option(CHIP_USE_INTEL_USM "When enabled, cl_intel_unified_shared_memory extension, when available, will be used for HIP allocations in the OpenCL backend" ON)

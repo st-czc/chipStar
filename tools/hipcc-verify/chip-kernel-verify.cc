@@ -11,13 +11,19 @@
 // Env:
 //   HIPCC_VERIFY           0 = skip; warn = print only; anything else = fail on mismatch.
 //                          Defaults to CHIP_KERNEL_VERIFY_DEFAULT_MODE at build time.
-//   HIPCC_VERIFY_DEVICES   comma-separated -device values for ocloc (default: dg2).
+//   HIPCC_VERIFY_DEVICES   comma-separated -device values for ocloc. Unset and
+//                          empty both mean "the Intel GPUs this host has".
 //   HIPCC_VERIFY_OCLOC     override ocloc binary (default: ocloc).
+//
+// Args:
+//   --print-devices        print the -device values that would be used, one
+//                          per line, and exit. Nothing is compiled.
 
 #include "spirv-extractor.hh"
 
 // Note: Elf64_Ehdr / Elf64_Shdr / ELFMAG / SELFMAG are defined portably
 // (Linux + macOS) by spirv-extractor.hh, included above.
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -32,9 +38,16 @@
 #include <unistd.h>
 #include <vector>
 
+// Set from -DHIPCC_VERIFY_DEVICES at configure time. Empty means the device
+// list comes from the host instead of from the build.
 #ifndef CHIP_KERNEL_VERIFY_DEFAULT_DEVICES
-#define CHIP_KERNEL_VERIFY_DEFAULT_DEVICES "dg2"
+#define CHIP_KERNEL_VERIFY_DEFAULT_DEVICES ""
 #endif
+
+// Used only when the host has no Intel GPU to detect and the build pinned
+// nothing, which is also the configuration where ocloc is least likely to be
+// installed at all.
+#define CHIP_KERNEL_VERIFY_FALLBACK_DEVICE "dg2"
 
 namespace fs = std::filesystem;
 
@@ -60,6 +73,67 @@ std::vector<std::string> split(const std::string &s, char delim) {
   }
   if (!cur.empty()) out.push_back(cur);
   return out;
+}
+
+// The Intel GPUs this host has, as ocloc -device values.
+//
+// ocloc takes a PCI device ID in hex and resolves it itself ("-device 0xe20c"
+// prints "Auto-detected target based on 0xe20c device id: bmg-g21"), so the
+// IDs sysfs reports are usable -device values and no product table is needed
+// here. Vendor 0x8086 is Intel; PCI class 0x0300 is "VGA compatible
+// controller" and 0x0380 is "Display controller, other", which is what a
+// headless compute GPU such as a Data Center GPU Max card reports.
+//
+// Absent on macOS, where /sys does not exist; the caller falls back.
+std::vector<std::string> detectHostDevices() {
+  std::vector<std::string> devices;
+  std::error_code ec;
+  fs::directory_iterator it("/sys/bus/pci/devices", ec);
+  if (ec) return devices;
+
+  auto readField = [](const fs::path &p) {
+    std::ifstream in(p);
+    std::string v;
+    std::getline(in, v);
+    return v;
+  };
+
+  // directory_iterator order is unspecified, so sort the PCI addresses to keep
+  // the device list stable across runs on a multi-GPU host. Increment through
+  // the error_code overload: the throwing one would take down a compile over
+  // an unreadable sysfs entry.
+  std::vector<fs::path> entries;
+  for (const fs::directory_iterator end; it != end; it.increment(ec)) {
+    if (ec) return {};
+    entries.push_back(it->path());
+  }
+  std::sort(entries.begin(), entries.end());
+
+  for (const auto &dev : entries) {
+    if (readField(dev / "vendor") != "0x8086") continue;
+    std::string cls = readField(dev / "class");
+    if (cls.compare(0, 6, "0x0300") != 0 && cls.compare(0, 6, "0x0380") != 0)
+      continue;
+    std::string id = readField(dev / "device");
+    if (id.empty()) continue;
+    // Two cards of the same model compile identically; one run covers both.
+    if (std::find(devices.begin(), devices.end(), id) == devices.end())
+      devices.push_back(id);
+  }
+  return devices;
+}
+
+// Precedence: the HIPCC_VERIFY_DEVICES environment variable, then the list
+// pinned at configure time, then the GPUs found on this host.
+std::vector<std::string> resolveDevices() {
+  std::string devsEnv;
+  if (const char *e = std::getenv("HIPCC_VERIFY_DEVICES")) devsEnv = e;
+  if (devsEnv.empty()) devsEnv = CHIP_KERNEL_VERIFY_DEFAULT_DEVICES;
+  if (!devsEnv.empty()) return split(devsEnv, ',');
+
+  auto devices = detectHostDevices();
+  if (devices.empty()) devices.push_back(CHIP_KERNEL_VERIFY_FALLBACK_DEVICE);
+  return devices;
 }
 
 std::string oclocBin() {
@@ -167,6 +241,11 @@ int verifyOneDevice(const fs::path &spvFile, const std::string &device,
 } // namespace
 
 int main(int argc, char *argv[]) {
+  if (argc == 2 && std::strcmp(argv[1], "--print-devices") == 0) {
+    for (const auto &d : resolveDevices()) std::cout << d << "\n";
+    return 0;
+  }
+
   Mode mode = readMode();
   if (mode == Mode::Off) return 0;
 
@@ -254,10 +333,7 @@ int main(int argc, char *argv[]) {
   auto spvNames = scanEntryPoints(text);
   if (spvNames.empty()) return 0;
 
-  std::string devsEnv;
-  if (const char *e = std::getenv("HIPCC_VERIFY_DEVICES")) devsEnv = e;
-  if (devsEnv.empty()) devsEnv = CHIP_KERNEL_VERIFY_DEFAULT_DEVICES;
-  auto devices = split(devsEnv, ',');
+  auto devices = resolveDevices();
 
   fs::path workDir = fs::temp_directory_path() /
                      ("chip-kernel-verify-" + std::to_string(getpid()));

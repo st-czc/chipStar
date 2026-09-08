@@ -16,9 +16,11 @@ set_tests_properties(hipcc_verify_off_mode_silent PROPERTIES
   FAIL_REGULAR_EXPRESSION "missing from native binary|ocloc"
   TIMEOUT 30)
 
-# The ocloc target must come from the GPUs present on this host, not a
-# hardcoded one that may be absent and may lack a capability the code under
-# test uses. See https://github.com/CHIP-SPV/chipStar/issues/1599
+# The ocloc target must be the GPU the code will run on, not one fixed at
+# build time that may lack a capability the kernels use. ocloc is replaced by
+# a stub, so this asserts on every host and never skips: a machine with no
+# Intel GPU asserts that nothing was compiled and that the tool said so.
+# See https://github.com/CHIP-SPV/chipStar/issues/1599
 configure_file(TestFix1599VerifyDeviceFromPlatform.bash
   TestFix1599VerifyDeviceFromPlatform.bash @ONLY)
 add_test(NAME TestFix1599VerifyDeviceFromPlatform
@@ -27,5 +29,4 @@ add_test(NAME TestFix1599VerifyDeviceFromPlatform
 set_tests_properties(TestFix1599VerifyDeviceFromPlatform PROPERTIES
   PASS_REGULAR_EXPRESSION "PASS"
   FAIL_REGULAR_EXPRESSION "FAIL"
-  SKIP_REGULAR_EXPRESSION "HIP_SKIP_THIS_TEST"
   TIMEOUT 60)

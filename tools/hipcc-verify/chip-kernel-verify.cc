@@ -333,10 +333,6 @@ int main(int argc, char *argv[]) {
     return 0;
   }
 
-  if (!oclocAvailable())
-    return reportNoCoverage(resolveDevices(), mode,
-                            "ocloc not found (tried '" + oclocBin() + "')");
-
   // Slurp the input. seekToMagic() in spirv-extractor does an unbounded 1MB
   // scan on the raw data path, so pad the buffer to avoid OOB reads on small
   // inputs (raw .spv files, small objects, etc).
@@ -404,6 +400,13 @@ int main(int argc, char *argv[]) {
   std::string text = disassembleSPIRV(spirv);
   auto spvNames = scanEntryPoints(text);
   if (spvNames.empty()) return 0;
+
+  // Only now is there something this tool was meant to check, so only now does
+  // a missing ocloc mean coverage was lost. Asking earlier would reject a
+  // host-only link, which carries no kernels and never needed ocloc.
+  if (!oclocAvailable())
+    return reportNoCoverage(resolveDevices(), mode,
+                            "ocloc not found (tried '" + oclocBin() + "')");
 
   DeviceList resolved = resolveDevices();
   const auto &devices = resolved.Devices;

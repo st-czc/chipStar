@@ -11,13 +11,22 @@
 // Env:
 //   HIPCC_VERIFY           0 = skip; warn = print only; anything else = fail on mismatch.
 //                          Defaults to CHIP_KERNEL_VERIFY_DEFAULT_MODE at build time.
-//   HIPCC_VERIFY_DEVICES   comma-separated -device values for ocloc. Unset and
-//                          empty both mean "the Intel GPUs this host has".
+//   HIPCC_VERIFY_DEVICES   comma-separated -device values for ocloc, replacing
+//                          the list pinned at configure time. Set but empty
+//                          asks for detection; unset falls back to the pin, and
+//                          to detection when nothing was pinned.
 //   HIPCC_VERIFY_OCLOC     override ocloc binary (default: ocloc).
 //
 // Args:
 //   --print-devices        print the -device values that would be used, one
 //                          per line, and exit. Nothing is compiled.
+//
+// ocloc is a cross compiler and will happily build for a part that is not in
+// the machine, so the target is not about what ocloc can reach. It is about
+// capability: a target with fewer capabilities than the GPU the code will run
+// on fails to compile, verifyOneDevice skips it, and the run checks nothing.
+// That is what made the old fixed dg2 target inert on a host whose kernels use
+// fp64. See https://github.com/CHIP-SPV/chipStar/issues/1599
 
 #include "spirv-extractor.hh"
 
@@ -43,11 +52,6 @@
 #ifndef CHIP_KERNEL_VERIFY_DEFAULT_DEVICES
 #define CHIP_KERNEL_VERIFY_DEFAULT_DEVICES ""
 #endif
-
-// Used only when the host has no Intel GPU to detect and the build pinned
-// nothing, which is also the configuration where ocloc is least likely to be
-// installed at all.
-#define CHIP_KERNEL_VERIFY_FALLBACK_DEVICE "dg2"
 
 namespace fs = std::filesystem;
 
@@ -80,11 +84,16 @@ std::vector<std::string> split(const std::string &s, char delim) {
 // ocloc takes a PCI device ID in hex and resolves it itself ("-device 0xe20c"
 // prints "Auto-detected target based on 0xe20c device id: bmg-g21"), so the
 // IDs sysfs reports are usable -device values and no product table is needed
-// here. Vendor 0x8086 is Intel; PCI class 0x0300 is "VGA compatible
-// controller" and 0x0380 is "Display controller, other", which is what a
-// headless compute GPU such as a Data Center GPU Max card reports.
+// here. An id resolves to the base stepping ocloc associates with it, which
+// need not be the stepping installed (0x0bd5 resolves to pvc-xt-a0), so pin
+// HIPCC_VERIFY_DEVICES where a specific stepping matters.
 //
-// Absent on macOS, where /sys does not exist; the caller falls back.
+// Vendor 0x8086 is Intel. The class is matched on the PCI base class
+// 0x03, "Display controller", rather than on a sub-class: which sub-class a
+// GPU reports varies (0x0300 VGA compatible, 0x0302 3D, 0x0380 other) and a
+// headless compute card need not report the one a desktop card does.
+//
+// Returns empty where there is no /sys to read, which includes macOS.
 std::vector<std::string> detectHostDevices() {
   std::vector<std::string> devices;
   std::error_code ec;
@@ -100,20 +109,22 @@ std::vector<std::string> detectHostDevices() {
 
   // directory_iterator order is unspecified, so sort the PCI addresses to keep
   // the device list stable across runs on a multi-GPU host. Increment through
-  // the error_code overload: the throwing one would take down a compile over
-  // an unreadable sysfs entry.
+  // the error_code overload so that a directory that cannot be walked ends the
+  // whole run in "nothing was verified" rather than throwing out of a compile,
+  // and rather than silently verifying whatever the walk reached first.
   std::vector<fs::path> entries;
   for (const fs::directory_iterator end; it != end; it.increment(ec)) {
     if (ec) return {};
     entries.push_back(it->path());
   }
+  // An increment can fail and land on end in one step, which the check above
+  // would never see; a partial list would silently narrow what gets verified.
+  if (ec) return {};
   std::sort(entries.begin(), entries.end());
 
   for (const auto &dev : entries) {
     if (readField(dev / "vendor") != "0x8086") continue;
-    std::string cls = readField(dev / "class");
-    if (cls.compare(0, 6, "0x0300") != 0 && cls.compare(0, 6, "0x0380") != 0)
-      continue;
+    if (readField(dev / "class").compare(0, 4, "0x03") != 0) continue;
     std::string id = readField(dev / "device");
     if (id.empty()) continue;
     // Two cards of the same model compile identically; one run covers both.
@@ -123,17 +134,27 @@ std::vector<std::string> detectHostDevices() {
   return devices;
 }
 
-// Precedence: the HIPCC_VERIFY_DEVICES environment variable, then the list
-// pinned at configure time, then the GPUs found on this host.
-std::vector<std::string> resolveDevices() {
-  std::string devsEnv;
-  if (const char *e = std::getenv("HIPCC_VERIFY_DEVICES")) devsEnv = e;
-  if (devsEnv.empty()) devsEnv = CHIP_KERNEL_VERIFY_DEFAULT_DEVICES;
-  if (!devsEnv.empty()) return split(devsEnv, ',');
+// The resolved targets, and whether they were asked for rather than found. An
+// empty list from a setting that was given is a different mistake from an
+// empty list on a host with no GPU, and the two need different diagnostics.
+struct DeviceList {
+  std::vector<std::string> Devices;
+  bool Requested = false;
+};
 
-  auto devices = detectHostDevices();
-  if (devices.empty()) devices.push_back(CHIP_KERNEL_VERIFY_FALLBACK_DEVICE);
-  return devices;
+// Precedence: the HIPCC_VERIFY_DEVICES environment variable, then the list
+// pinned at configure time, then the GPUs found on this host. There is no
+// guessed target behind those: verifying against a part nobody asked for and
+// nobody has is the inert verification this tool exists to stop.
+DeviceList resolveDevices() {
+  const char *Env = std::getenv("HIPCC_VERIFY_DEVICES");
+  // Setting the variable replaces the configure-time list outright, so setting
+  // it to nothing asks for detection. That is the only way to get detection out
+  // of a build that pinned a target, and it is what the test uses to assert
+  // detection on a pinned build.
+  std::string devsEnv = Env ? Env : CHIP_KERNEL_VERIFY_DEFAULT_DEVICES;
+  if (!devsEnv.empty()) return {split(devsEnv, ','), true};
+  return {detectHostDevices(), false};
 }
 
 std::string oclocBin() {
@@ -186,9 +207,18 @@ std::set<std::string> scanNativeKernels(const fs::path &sectionsFile) {
   return names;
 }
 
-int verifyOneDevice(const fs::path &spvFile, const std::string &device,
-                    const std::set<std::string> &spvNames, Mode mode,
-                    const fs::path &workDir) {
+// Whether this device got as far as diffing kernel names, and how many
+// mismatches that diff counted. A device that never got there checked nothing,
+// which the caller has to know: a run where no device got there is a run that
+// verified nothing at all.
+struct DeviceResult {
+  bool Compared = false;
+  int Failures = 0;
+};
+
+DeviceResult verifyOneDevice(const fs::path &spvFile, const std::string &device,
+                             const std::set<std::string> &spvNames, Mode mode,
+                             const fs::path &workDir) {
   fs::path outBase = workDir / ("native_" + device);
   std::string cmd = oclocBin() + " compile -spirv_input"
                     + " -file " + spvFile.string()
@@ -198,6 +228,17 @@ int verifyOneDevice(const fs::path &spvFile, const std::string &device,
   int rc = runCapture(cmd, log);
   fs::path binFile = outBase.string() + ".bin";
   if (rc != 0 || !fs::exists(binFile)) {
+    // An id this ocloc has no target for is not a compile error at all, and the
+    // full ocloc log says nothing useful about it. It happens for a GPU older
+    // than the ocloc in use, whose id detection reports faithfully and ocloc
+    // then rejects, so answer the question the user actually has.
+    if (log.find("Could not determine device target") != std::string::npos) {
+      std::cerr << "[chip-kernel-verify] ocloc has no target for device '"
+                << device << "', so it was not checked. Set"
+                   " HIPCC_VERIFY_DEVICES to an ocloc -device value, or"
+                   " HIPCC_VERIFY=0 to turn this off.\n";
+      return {};
+    }
     // ocloc explicitly errored (e.g. fp64 not supported on this device) — that
     // is a real but ordinary compile error, not the silent-drop class of
     // problem this tool is here to detect (intel-graphics-compiler#403).
@@ -205,7 +246,7 @@ int verifyOneDevice(const fs::path &spvFile, const std::string &device,
     std::cerr << "[chip-kernel-verify] ocloc compile errored for device '"
               << device << "' (exit " << rc << ") — not an IGC #403 drop;"
               << " skipping verification for this device:\n" << log << "\n";
-    return 0;
+    return {};
   }
 
   fs::path dumpDir = workDir / ("dump_" + device);
@@ -219,7 +260,7 @@ int verifyOneDevice(const fs::path &spvFile, const std::string &device,
   if (!fs::exists(sectionsFile)) {
     std::cerr << "[chip-kernel-verify] ocloc disasm produced no sections.txt for '"
               << device << "' (exit " << drc << "); skipping diff\n";
-    return 0;
+    return {};
   }
 
   auto native = scanNativeKernels(sectionsFile);
@@ -227,7 +268,7 @@ int verifyOneDevice(const fs::path &spvFile, const std::string &device,
   for (const auto &n : spvNames)
     if (!native.count(n)) missing.push_back(n);
 
-  if (missing.empty()) return 0;
+  if (missing.empty()) return {true, 0};
 
   std::cerr << "[chip-kernel-verify] device=" << device
             << ": " << missing.size() << " kernel(s) missing from native binary"
@@ -235,14 +276,18 @@ int verifyOneDevice(const fs::path &spvFile, const std::string &device,
                " https://github.com/intel/intel-graphics-compiler/issues/403 ):\n";
   for (const auto &m : missing) std::cerr << "    - " << m << "\n";
 
-  return mode == Mode::Fail ? 1 : 0;
+  return {true, mode == Mode::Fail ? 1 : 0};
 }
 
 } // namespace
 
 int main(int argc, char *argv[]) {
-  if (argc == 2 && std::strcmp(argv[1], "--print-devices") == 0) {
-    for (const auto &d : resolveDevices()) std::cout << d << "\n";
+  if (argc > 1 && std::strcmp(argv[1], "--print-devices") == 0) {
+    if (argc != 2) {
+      std::cerr << "usage: chip-kernel-verify --print-devices\n";
+      return 2;
+    }
+    for (const auto &d : resolveDevices().Devices) std::cout << d << "\n";
     return 0;
   }
 
@@ -250,8 +295,15 @@ int main(int argc, char *argv[]) {
   if (mode == Mode::Off) return 0;
 
   if (argc < 2) {
-    std::cerr << "usage: chip-kernel-verify <compiled-output>\n";
+    std::cerr << "usage: chip-kernel-verify <compiled-output> | --print-devices\n";
     return 0; // don't fail user's build over a missing arg
+  }
+  // Without this an option typo is taken for a filename, does not exist, and
+  // the run reports success having checked nothing.
+  if (argv[1][0] == '-' && argv[1][1] == '-') {
+    std::cerr << "chip-kernel-verify: unknown option '" << argv[1] << "'\n"
+              << "usage: chip-kernel-verify <compiled-output> | --print-devices\n";
+    return 2;
   }
   fs::path input = argv[1];
   if (!fs::exists(input)) {
@@ -333,7 +385,18 @@ int main(int argc, char *argv[]) {
   auto spvNames = scanEntryPoints(text);
   if (spvNames.empty()) return 0;
 
-  auto devices = resolveDevices();
+  DeviceList resolved = resolveDevices();
+  const auto &devices = resolved.Devices;
+  if (devices.empty()) {
+    std::cerr << "[chip-kernel-verify] "
+              << (resolved.Requested
+                      ? "the requested device list names no device"
+                      : "no Intel GPU found in /sys/bus/pci/devices and no"
+                        " HIPCC_VERIFY_DEVICES set")
+              << " — nothing was verified. Set HIPCC_VERIFY_DEVICES to an ocloc"
+                 " -device value to check against a specific target.\n";
+    return 0;
+  }
 
   fs::path workDir = fs::temp_directory_path() /
                      ("chip-kernel-verify-" + std::to_string(getpid()));
@@ -345,9 +408,19 @@ int main(int argc, char *argv[]) {
   }
 
   int fails = 0;
+  int compared = 0;
   for (const auto &d : devices) {
-    fails += verifyOneDevice(spvFile, d, spvNames, mode, workDir);
+    DeviceResult r = verifyOneDevice(spvFile, d, spvNames, mode, workDir);
+    fails += r.Failures;
+    compared += r.Compared;
   }
+
+  // Every device skipped means the run produced no coverage at all, which is
+  // indistinguishable from a clean pass unless it is said out loud.
+  if (compared == 0)
+    std::cerr << "[chip-kernel-verify] none of the " << devices.size()
+              << " requested device(s) could be checked — this run verified"
+                 " nothing\n";
 
   std::error_code ec;
   fs::remove_all(workDir, ec);

@@ -174,6 +174,64 @@ fi
 printed=$(env -u HIPCC_VERIFY_DEVICES "${BIN}" --print-devices 2>/dev/null)
 check "--print-devices" "${printed}" "$(ask unset)"
 
+# Warn mode is best effort by definition: it reports and carries on, even for a
+# target that was asked for and could not be checked.
+warn_out=$(HIPCC_VERIFY=warn HIPCC_VERIFY_DEVICES=dg2 HIPCC_VERIFY_OCLOC="${WORK}/ocloc" \
+             "${BIN}" "${SPV}" 2>&1 >/dev/null)
+warn_rc=$?
+if [ ${warn_rc} -ne 0 ]; then
+  echo "FAIL: warn mode exited ${warn_rc} on an uncheckable target, expected 0"
+  echo "${warn_out}"
+  exit 1
+fi
+case "${warn_out}" in
+  *"nothing was verified"*) ;;
+  *) echo "FAIL: warn mode checked nothing and did not say so"
+     echo "${warn_out:-<no output>}"; exit 1 ;;
+esac
+
+# No ocloc at all is a run that checked nothing like any other, so a target that
+# was asked for still fails rather than passing for want of a compiler.
+noocloc_out=$(HIPCC_VERIFY_DEVICES=dg2 HIPCC_VERIFY_OCLOC="${WORK}/no-such-ocloc" \
+                "${BIN}" "${SPV}" 2>&1 >/dev/null)
+noocloc_rc=$?
+if [ ${noocloc_rc} -ne 1 ]; then
+  echo "FAIL: a requested target with no ocloc exited ${noocloc_rc}, expected 1"
+  echo "${noocloc_out:-<no output>}"
+  exit 1
+fi
+case "${noocloc_out}" in
+  *"ocloc not found"*) ;;
+  *) echo "FAIL: ocloc was missing and the tool did not say so"
+     echo "${noocloc_out:-<no output>}"; exit 1 ;;
+esac
+
+# The detection rule itself, against an inventory this machine does not have, so
+# the expectation comes from the fixture rather than from a second reading of
+# the same sysfs the tool reads.
+FAKE="${WORK}/sysfs"
+mkfake() { # mkfake <pci-address> <vendor> <class> <device>
+  mkdir -p "${FAKE}/$1"
+  echo "$2" > "${FAKE}/$1/vendor"
+  echo "$3" > "${FAKE}/$1/class"
+  echo "$4" > "${FAKE}/$1/device"
+}
+mkfake 0000:00:02.0 0x8086 0x030000 0xa780   # Intel, VGA compatible
+mkfake 0000:03:00.0 0x8086 0x038000 0x0bd5   # Intel, display controller other
+mkfake 0000:04:00.0 0x8086 0x030000 0x0bd5   # the same model a second time
+mkfake 0000:05:00.0 0x1002 0x030000 0x7422   # not Intel
+mkfake 0000:06:00.0 0x8086 0x040300 0xa728   # Intel, but audio
+# Empty asks for detection, so this reaches the fixture on a pinned build too.
+fake_got=$(HIPCC_VERIFY_SYSFS_ROOT="${FAKE}" HIPCC_VERIFY_DEVICES= \
+             "${BIN}" --print-devices 2>/dev/null)
+if [ "${fake_got}" != "$(printf '0xa780\n0x0bd5')" ]; then
+  echo "FAIL: detection over a known inventory produced"
+  echo "${fake_got:-<nothing>}"
+  echo "expected 0xa780 then 0x0bd5: one entry per model, in PCI order, with"
+  echo "the non-Intel and the non-display devices left out"
+  exit 1
+fi
+
 # With a target that does check out, the run has to report the kernels IGC
 # dropped and fail on them, and it must not claim it verified nothing. The stub
 # hands back a native binary with no kernels in it, which is that shape.

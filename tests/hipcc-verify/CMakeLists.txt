@@ -15,3 +15,17 @@ set_tests_properties(hipcc_verify_off_mode_silent PROPERTIES
   ENVIRONMENT "HIPCC_VERIFY=0"
   FAIL_REGULAR_EXPRESSION "missing from native binary|ocloc"
   TIMEOUT 30)
+
+# The ocloc target must come from the GPUs present on this host, not a
+# hardcoded one that may be absent and may lack a capability the code under
+# test uses. See https://github.com/CHIP-SPV/chipStar/issues/1599
+configure_file(TestFix1599VerifyDeviceFromPlatform.bash
+  TestFix1599VerifyDeviceFromPlatform.bash @ONLY)
+add_test(NAME TestFix1599VerifyDeviceFromPlatform
+  COMMAND /bin/bash
+          ${CMAKE_CURRENT_BINARY_DIR}/TestFix1599VerifyDeviceFromPlatform.bash)
+set_tests_properties(TestFix1599VerifyDeviceFromPlatform PROPERTIES
+  PASS_REGULAR_EXPRESSION "PASS"
+  FAIL_REGULAR_EXPRESSION "FAIL"
+  SKIP_REGULAR_EXPRESSION "HIP_SKIP_THIS_TEST"
+  TIMEOUT 60)

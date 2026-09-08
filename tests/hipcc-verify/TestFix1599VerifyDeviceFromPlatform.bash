@@ -209,17 +209,22 @@ esac
 # A link that carries no kernels never needed ocloc, so nothing about the
 # device policy may reject it. hipcc runs this hook on every final link,
 # host-only ones included.
+# Built with the compiler that configured this build, so there is no host where
+# the fixture quietly fails to appear and takes the assertion with it.
 HOSTONLY="${WORK}/hostonly"
-printf 'int main(void){return 0;}\n' > "${WORK}/hostonly.c"
-if cc "${WORK}/hostonly.c" -o "${HOSTONLY}" 2>/dev/null; then
-  hostonly_out=$(HIPCC_VERIFY_DEVICES=dg2 HIPCC_VERIFY_OCLOC="${WORK}/no-such-ocloc" \
-                   "${BIN}" "${HOSTONLY}" 2>&1 >/dev/null)
-  hostonly_rc=$?
-  if [ ${hostonly_rc} -ne 0 ]; then
-    echo "FAIL: a host-only link exited ${hostonly_rc}, expected 0"
-    echo "${hostonly_out:-<no output>}"
-    exit 1
-  fi
+printf 'int main() { return 0; }\n' > "${WORK}/hostonly.cpp"
+if ! cc_out=$("@CMAKE_CXX_COMPILER@" "${WORK}/hostonly.cpp" -o "${HOSTONLY}" 2>&1); then
+  echo "FAIL: could not build the host-only fixture with @CMAKE_CXX_COMPILER@"
+  echo "${cc_out:-<no output>}"
+  exit 1
+fi
+hostonly_out=$(HIPCC_VERIFY_DEVICES=dg2 HIPCC_VERIFY_OCLOC="${WORK}/no-such-ocloc" \
+                 "${BIN}" "${HOSTONLY}" 2>&1 >/dev/null)
+hostonly_rc=$?
+if [ ${hostonly_rc} -ne 0 ]; then
+  echo "FAIL: a host-only link exited ${hostonly_rc}, expected 0"
+  echo "${hostonly_out:-<no output>}"
+  exit 1
 fi
 
 # The detection rule itself, against an inventory this machine does not have, so

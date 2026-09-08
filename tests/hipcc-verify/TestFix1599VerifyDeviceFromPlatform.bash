@@ -23,13 +23,15 @@ else
   # Vendor 0x8086 is Intel; PCI class 0x0300 is "VGA compatible controller"
   # and 0x0380 is "Display controller, other", which is what a headless
   # compute GPU such as a PVC card reports.
+  #
+  # The class is matched with a substring test rather than a case statement:
+  # the bash 3.2 that macOS ships mis-parses a case pattern's ')' inside a
+  # command substitution and dies with "syntax error near unexpected token".
   expected=$(for d in /sys/bus/pci/devices/*; do
     [ -r "${d}/vendor" ] || continue
     [ "$(cat "${d}/vendor")" = "0x8086" ] || continue
-    case "$(cat "${d}/class")" in
-      0x0300*|0x0380*) ;;
-      *) continue ;;
-    esac
+    cls=$(cat "${d}/class")
+    [ "${cls:0:6}" = "0x0300" ] || [ "${cls:0:6}" = "0x0380" ] || continue
     cat "${d}/device"
   done | awk '!seen[$0]++')
   what="the Intel GPUs present on this host"

@@ -387,16 +387,24 @@ int main(int argc, char *argv[]) {
 
   DeviceList resolved = resolveDevices();
   const auto &devices = resolved.Devices;
-  if (devices.empty()) {
-    std::cerr << "[chip-kernel-verify] "
-              << (resolved.Requested
-                      ? "the requested device list names no device"
-                      : "no Intel GPU found in /sys/bus/pci/devices and no"
-                        " HIPCC_VERIFY_DEVICES set")
+
+  // A target that was asked for and could not be checked is a failure of
+  // something the user set up, and in fail mode it should stop the build like
+  // any other. A target that was only detected is different: an ocloc with no
+  // entry for the GPU in this machine must not be able to stop the machine
+  // building chipStar at all, so that stays a warning.
+  auto noCoverage = [&](const std::string &why) {
+    std::cerr << "[chip-kernel-verify] " << why
               << " — nothing was verified. Set HIPCC_VERIFY_DEVICES to an ocloc"
                  " -device value to check against a specific target.\n";
-    return 0;
-  }
+    return resolved.Requested && mode == Mode::Fail ? 1 : 0;
+  };
+
+  if (devices.empty())
+    return noCoverage(resolved.Requested
+                          ? "the requested device list names no device"
+                          : "no Intel GPU found in /sys/bus/pci/devices and no"
+                            " HIPCC_VERIFY_DEVICES set");
 
   fs::path workDir = fs::temp_directory_path() /
                      ("chip-kernel-verify-" + std::to_string(getpid()));
@@ -415,15 +423,14 @@ int main(int argc, char *argv[]) {
     compared += r.Compared;
   }
 
+  std::error_code ec;
+  fs::remove_all(workDir, ec);
+
   // Every device skipped means the run produced no coverage at all, which is
   // indistinguishable from a clean pass unless it is said out loud.
   if (compared == 0)
-    std::cerr << "[chip-kernel-verify] none of the " << devices.size()
-              << " requested device(s) could be checked — this run verified"
-                 " nothing\n";
-
-  std::error_code ec;
-  fs::remove_all(workDir, ec);
+    return noCoverage("none of the " + std::to_string(devices.size()) +
+                      " device(s) could be checked");
 
   return fails == 0 ? 0 : 1;
 }
